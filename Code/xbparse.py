@@ -23,13 +23,15 @@ class DataGrabber():
         # self._cik_number = self._get_cik(ticker)
         self._cik_number = "0001621832"
         self._insider_filings = self._get_insiders()
-        self._get_history("https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=0001649505")
+        # self._get_history("https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=0001649505")
+        print(json.dumps(self._insider_filings, indent=2))
+        self._get_insider_holdings()
         self._print()
 
     def _print(self):
         print("CIK: {}".format(self._cik_number))
-        for filing in self._insider_filings:
-            print(filing)
+        # for filing in self._insider_filings:
+        #     print(filing)
 
     def _get_cik(self, ticker):
         '''
@@ -73,8 +75,24 @@ class DataGrabber():
                 issuer_links.append(r)
         issuer_cik = []
         for link in issuer_links:
-            issuer_cik.append({"name":link.text, "url":"https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=" + link['href'][-10:]})
+            issuer_cik.append({"name":link.text,
+                               "url":"https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=" + link['href'][-10:],
+                               "history":None
+                               })
         return issuer_cik
+
+    def _get_insider_holdings(self):
+        '''
+        Goes through the holders and gets their holding history.
+
+        A little slow, but should only need to be done once.
+        :return:
+        '''
+        for holder in self._insider_filings:
+            print("Got one holder's history!")
+            holder["history"] = self._get_history(holder['url'])
+            print(json.dumps(holder["history"], indent=2))
+
 
     def _parse_options(self,url):
         '''
@@ -83,17 +101,72 @@ class DataGrabber():
         :param url:
         :return:
         '''
+        loc = "https://www.sec.gov"
         req = urlopen(url)
         soup = BeautifulSoup(req, 'lxml')
         table_whole = soup.find("table", {"class":"tableFile"})
         rows = table_whole.find_all("tr")
         hrefs = []
+        #I want to locate the xml file
+        xml_link = ""
         for r in rows:
-            
+            file = r.find("a")
+            link = ''
+            if(file is not None):
+                link = file.text
+                if(".xml" in link):
+                    xml_link = file['href']
+                    break
+        # print(xml_link)
+        xml_link = "https://www.sec.gov" + xml_link
+        balance, price, date_exercisable, expiration_date, filing_date = self._parse_options_xml(xml_link)
+        return (balance, price, date_exercisable, expiration_date, filing_date)
+
+    def _parse_options_xml(self, url):
+        '''
+        function for parsing the xml file of a stock options grant
+        :param url:
+        :return:
+        '''
+        def value_check(item):
+            if(not item):
+                return "N/A"
+            else:
+                return item.text
+        # print("Url attempted: {}".format(url))
+        req = urlopen(url) #sometimes this will get a 403 forbidden error when requesting the same document too soon
+        #the error 403 might stop parsing from larger companies if tracking is done not per document.
+        soup = BeautifulSoup(req, 'lxml')
+        dtable = soup.select("derivativeTable")
+        ndtable = soup.select("nonDerivativeTable")
+        fdate = soup.select("periodofreport")
+
+        price = "N/A"
+        exercise_date = "N/A"
+        expiration_date = "N/A"
+        filing_date = "N/A"
+        balance = "N/A"
+
+        balance_loc = "underlyingsecurityshares" #dtable
+        price_loc = "conversionorexerciseprice" #dtable
+        exercise_date_loc = "exercisedate" #dtable
+        expiration_date_loc = "expirationdate" #dtable
+        filing_date = fdate[0].text
+
+        balance = value_check(dtable[0].find(balance_loc).find("value"))
+        price = value_check(dtable[0].find(price_loc).find("value"))
+        exercise_date = value_check(dtable[0].find(exercise_date_loc).find("value"))
+        expiration_date = value_check(dtable[0].find(expiration_date_loc).find("value"))
+
+        #print(balance, price, exercise_date, expiration_date, filing_date)
+
+        return balance, price, exercise_date, expiration_date, filing_date
+
 
     def _get_history(self, url):
         '''
         gets the history of various types of holdings for a single filer
+        URL is the index page of the given holder with their CIK number
         :param url:
         :return:
         '''
@@ -106,7 +179,7 @@ class DataGrabber():
         history = {}
         for i in items:
             count = 0
-            loc = "https://www.sec.gov/"
+            loc = "https://www.sec.gov"
             suffix = i.find("a", href=True)['href']
             loc += suffix
             for element in i:
@@ -120,26 +193,34 @@ class DataGrabber():
             # print(transaction_type)
             # print(balance)
             # print(date)
+            price = "N/A"
+            exercise_date = "N/A"
+            expiration_date = "N/A"
+            filing_date = "N/A"
             if transaction_type not in history.keys():
                 history[transaction_type] = []
+            if ("Option" in transaction_type):
+                balance, price, exercise_date, expiration_date, filing_date = self._parse_options(loc)
+
             history[transaction_type].append({"date":date,
-                                              "balance":balance,
+                                              "shares":balance,
                                               "url":loc,
-                                              "price":"N/A",
-                                              "date excercisable":"N/A",
-                                              "expiration date":"N/A"
+                                              "price":price,
+                                              "exercise date":exercise_date,
+                                              "expiration date":expiration_date,
+                                              "filing date":filing_date
                                               })
 
 
             # history[transaction_type].append({"date":date, "balance":balance})
-        print(json.dumps(history, indent=2))
+        # print(json.dumps(history, indent=2))
 
-    def _get_holdings(self):
-        '''
-        gets a relatively complete history of insider holdings, will add more functionality for stock options in the
-        future, just a proof of concept for now.
-        :return:
-        '''
+    # def _get_holdings(self):
+    #     '''
+    #     gets a relatively complete history of insider holdings, will add more functionality for stock options in the
+    #     future, just a proof of concept for now.
+    #     :return:
+    #     '''
 
 
 class Financials():
