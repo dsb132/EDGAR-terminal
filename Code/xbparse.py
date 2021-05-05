@@ -4,6 +4,7 @@ import glob
 from bs4 import BeautifulSoup
 import re
 import json
+from urllib.request import urlopen
 import requests
 import pandas
 import os
@@ -15,6 +16,131 @@ from multiprocessing import Process
 from datetime import date
 
 usg = re.compile("us-gaap:*")
+
+class DataGrabber():
+
+    def __init__(self, ticker):
+        # self._cik_number = self._get_cik(ticker)
+        self._cik_number = "0001621832"
+        self._insider_filings = self._get_insiders()
+        self._get_history("https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=0001649505")
+        self._print()
+
+    def _print(self):
+        print("CIK: {}".format(self._cik_number))
+        for filing in self._insider_filings:
+            print(filing)
+
+    def _get_cik(self, ticker):
+        '''
+        gets the cik number from the ticker!
+        :param ticker:
+        :return:
+        '''
+        searchurl = "http://www.sec.gov/cgi-bin/browse-edgar?" + "action=getcompany&"
+        full = searchurl + "CIK={}".format(ticker)
+        # with open("website.txt", mode='r') as f:
+        #     req = f.read()
+        # print(full)
+        req = urlopen(full)
+        soup = BeautifulSoup(req, 'lxml')
+        span = soup.find("span", {"class":"companyName"})
+        cikurl = span.find("a")
+        # print(cikurl.text[0:9])
+        cik_num = cikurl.text[0:10]
+        return cik_num
+
+    def _get_insiders(self):
+        '''
+        gets a list of CIK numbers and hrefs linked to the large holders of company
+        :return:
+        '''
+        # url = "https://www.sec.gov/cgi-bin/own-disp?" + "action=getissuer&" + "CIK={}".format(self._cik_number)
+        # req = urlopen(url)
+        # with open("website.txt", mode='w', encoding='utf-8') as f:
+        #     d = str(req.read(), encoding='utf-8')
+        #     f.write(d)
+        with open("website.txt", mode='r') as f:
+            req = f.read()
+        soup = BeautifulSoup(req, 'lxml')
+        table_rows = soup.find_all("tr")
+        issuer_links = []
+        for row in table_rows:
+            r = row.find("a", href=True)
+            if(not r):
+                continue
+            if("getowner" in r['href']):
+                issuer_links.append(r)
+        issuer_cik = []
+        for link in issuer_links:
+            issuer_cik.append({"name":link.text, "url":"https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=" + link['href'][-10:]})
+        return issuer_cik
+
+    def _parse_options(self,url):
+        '''
+        gets an index url, will then get the xml document and parse to find
+        relevant values
+        :param url:
+        :return:
+        '''
+        req = urlopen(url)
+        soup = BeautifulSoup(req, 'lxml')
+        table_whole = soup.find("table", {"class":"tableFile"})
+        rows = table_whole.find_all("tr")
+        hrefs = []
+        for r in rows:
+            
+
+    def _get_history(self, url):
+        '''
+        gets the history of various types of holdings for a single filer
+        :param url:
+        :return:
+        '''
+        req = urlopen(url)
+        soup = BeautifulSoup(req, 'lxml')
+        table_whole = soup.find("table", {"id":"transaction-report"})
+        items = table_whole.find_all("tr", {"class":False})
+        # for i in items:
+        #     print(i)
+        history = {}
+        for i in items:
+            count = 0
+            loc = "https://www.sec.gov/"
+            suffix = i.find("a", href=True)['href']
+            loc += suffix
+            for element in i:
+                if(count == 3):
+                    date = element.text
+                elif(count == 17):
+                    balance = element.text
+                elif(count == 23):
+                    transaction_type = element.text
+                count += 1
+            # print(transaction_type)
+            # print(balance)
+            # print(date)
+            if transaction_type not in history.keys():
+                history[transaction_type] = []
+            history[transaction_type].append({"date":date,
+                                              "balance":balance,
+                                              "url":loc,
+                                              "price":"N/A",
+                                              "date excercisable":"N/A",
+                                              "expiration date":"N/A"
+                                              })
+
+
+            # history[transaction_type].append({"date":date, "balance":balance})
+        print(json.dumps(history, indent=2))
+
+    def _get_holdings(self):
+        '''
+        gets a relatively complete history of insider holdings, will add more functionality for stock options in the
+        future, just a proof of concept for now.
+        :return:
+        '''
+
 
 class Financials():
     '''
@@ -1108,6 +1234,7 @@ def g(x):
 
 if __name__ == "__main__":
     fname = '20180405mon'
+    grabber = DataGrabber("AQMS")
     pass
 
 
