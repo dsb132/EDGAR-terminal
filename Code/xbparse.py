@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import re
 import json
 from urllib.request import urlopen
+import urllib.request
 import requests
 import pandas
 import os
@@ -14,19 +15,39 @@ from threading import Thread
 import time
 from multiprocessing import Process
 from datetime import date
+import random
 
 usg = re.compile("us-gaap:*")
 
 class DataGrabber():
+    '''
+    This is good so far but perhaps not complete. I don't know what effect restricted stock has,
+    the addition of the user-agent workaround should allow me to pull files when I need and avoid 403
+    '''
+
+    #some randomly generated user agents to be used at random when doing HTTP requests.
+    u_agents = ["Mozilla/5.0 (Windows; U; Windows NT 6.2) AppleWebKit/532.25.3 (KHTML, like Gecko) Version/5.0.3 Safari/532.25.3",
+                "Mozilla/5.0 (Macintosh; U; PPC Mac OS X 10_7_9 rv:3.0; en-US) AppleWebKit/534.32.7 (KHTML, like Gecko) Version/5.0.4 Safari/534.32.7",
+                "Opera/9.10 (X11; Linux x86_64; en-US) Presto/2.9.183 Version/10.00",
+                "Mozilla/5.0 (iPad; CPU OS 8_2_1 like Mac OS X; en-US) AppleWebKit/532.7.4 (KHTML, like Gecko) Version/3.0.5 Mobile/8B118 Safari/6532.7.4",
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 7_0_2 like Mac OS X; sl-SI) AppleWebKit/535.38.4 (KHTML, like Gecko) Version/3.0.5 Mobile/8B114 Safari/6535.38.4",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_5_0 rv:5.0; sl-SI) AppleWebKit/532.48.6 (KHTML, like Gecko) Version/4.0.4 Safari/532.48.6"
+                ]
+    def u_agent(self):
+        return random.choice(self.u_agents)
 
     def __init__(self, ticker):
-        # self._cik_number = self._get_cik(ticker)
-        self._cik_number = "0001621832"
+        self._cik_number = self._get_cik(ticker)
+        # self._cik_number = "0001621832"
         self._insider_filings = self._get_insiders()
-        # self._get_history("https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=0001649505")
-        print(json.dumps(self._insider_filings, indent=2))
+        # d = self._get_history("https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=0001649505")
+        # print(json.dumps(d, indent=2))
         self._get_insider_holdings()
+
+        with open("holdings.json", 'w') as f:
+            f.write(json.dumps(self._insider_filings, indent=2))
         self._print()
+
 
     def _print(self):
         print("CIK: {}".format(self._cik_number))
@@ -44,8 +65,8 @@ class DataGrabber():
         # with open("website.txt", mode='r') as f:
         #     req = f.read()
         # print(full)
-        req = urlopen(full)
-        soup = BeautifulSoup(req, 'lxml')
+        req = urlopen(urllib.request.Request(full, headers={"User-Agent":self.u_agent()})) #do this to get around 403
+        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
         span = soup.find("span", {"class":"companyName"})
         cikurl = span.find("a")
         # print(cikurl.text[0:9])
@@ -57,14 +78,14 @@ class DataGrabber():
         gets a list of CIK numbers and hrefs linked to the large holders of company
         :return:
         '''
-        # url = "https://www.sec.gov/cgi-bin/own-disp?" + "action=getissuer&" + "CIK={}".format(self._cik_number)
-        # req = urlopen(url)
+        url = "https://www.sec.gov/cgi-bin/own-disp?" + "action=getissuer&" + "CIK={}".format(self._cik_number)
+        req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()}))
         # with open("website.txt", mode='w', encoding='utf-8') as f:
         #     d = str(req.read(), encoding='utf-8')
         #     f.write(d)
-        with open("website.txt", mode='r') as f:
-            req = f.read()
-        soup = BeautifulSoup(req, 'lxml')
+        # with open("website.txt", mode='r') as f:
+        #     req = f.read()
+        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
         table_rows = soup.find_all("tr")
         issuer_links = []
         for row in table_rows:
@@ -89,8 +110,9 @@ class DataGrabber():
         :return:
         '''
         for holder in self._insider_filings:
-            print("Got one holder's history!")
+            print("Fetching the history now!")
             holder["history"] = self._get_history(holder['url'])
+            print("Got their history!")
             print(json.dumps(holder["history"], indent=2))
 
 
@@ -102,8 +124,8 @@ class DataGrabber():
         :return:
         '''
         loc = "https://www.sec.gov"
-        req = urlopen(url)
-        soup = BeautifulSoup(req, 'lxml')
+        req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()}))
+        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
         table_whole = soup.find("table", {"class":"tableFile"})
         rows = table_whole.find_all("tr")
         hrefs = []
@@ -134,9 +156,9 @@ class DataGrabber():
             else:
                 return item.text
         # print("Url attempted: {}".format(url))
-        req = urlopen(url) #sometimes this will get a 403 forbidden error when requesting the same document too soon
+        req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()})) #sometimes this will get a 403 forbidden error when requesting the same document too soon
         #the error 403 might stop parsing from larger companies if tracking is done not per document.
-        soup = BeautifulSoup(req, 'lxml')
+        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
         dtable = soup.select("derivativeTable")
         ndtable = soup.select("nonDerivativeTable")
         fdate = soup.select("periodofreport")
@@ -170,14 +192,24 @@ class DataGrabber():
         :param url:
         :return:
         '''
-        req = urlopen(url)
-        soup = BeautifulSoup(req, 'lxml')
+        req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()}))
+        # print(str(req.read(), encoding='utf-8'))
+        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
         table_whole = soup.find("table", {"id":"transaction-report"})
+        # print(type(table_whole))
+        # print(table_whole == None)
+        # print(table_whole)
+        # print(type(table_whole))
+        # table_whole = BeautifulSoup(table_whole.getText(), 'lxml')
         items = table_whole.find_all("tr", {"class":False})
+        # print("Stuff here")
         # for i in items:
         #     print(i)
         history = {}
+        # print("Done")
         for i in items:
+            if (type(i) == type(None)):
+                continue
             count = 0
             loc = "https://www.sec.gov"
             suffix = i.find("a", href=True)['href']
@@ -193,6 +225,7 @@ class DataGrabber():
             # print(transaction_type)
             # print(balance)
             # print(date)
+            # print("Got all the way here")
             price = "N/A"
             exercise_date = "N/A"
             expiration_date = "N/A"
@@ -210,8 +243,7 @@ class DataGrabber():
                                               "expiration date":expiration_date,
                                               "filing date":filing_date
                                               })
-
-
+        return history
             # history[transaction_type].append({"date":date, "balance":balance})
         # print(json.dumps(history, indent=2))
 
@@ -1315,7 +1347,7 @@ def g(x):
 
 if __name__ == "__main__":
     fname = '20180405mon'
-    grabber = DataGrabber("AQMS")
+    grabber = DataGrabber("AQMS")#try to get data for a relatively small company!
     pass
 
 
