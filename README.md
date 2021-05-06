@@ -1,6 +1,8 @@
 # EDGAR-terminal
 
-xbparse.py is the XBRL processor
+xbparse.py is the XBRL processor,
+also contains class for scraping insider holdings.
+
 out.json is an example output from the XBRL processor
 reports_getter.py deprecated code for requesting reports from SEC
 
