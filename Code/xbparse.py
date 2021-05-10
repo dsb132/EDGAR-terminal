@@ -37,14 +37,13 @@ class DataGrabber():
         return random.choice(self.u_agents)
 
     def __init__(self, ticker):
+        self._issuer_name = ""
         self._cik_number = self._get_cik(ticker)
-        # self._cik_number = "0001621832"
         self._insider_filings = self._get_insiders()
-        # d = self._get_history("https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=0001649505")
-        # print(json.dumps(d, indent=2))
+        # print(json.dumps(self._insider_filings, indent=2))
         self._get_insider_holdings()
 
-        with open("holdings.json", 'w') as f:
+        with open("{}_holdings.json".format(ticker), 'w') as f:
             f.write(json.dumps(self._insider_filings, indent=2))
         self._print()
 
@@ -68,6 +67,7 @@ class DataGrabber():
         req = urlopen(urllib.request.Request(full, headers={"User-Agent":self.u_agent()})) #do this to get around 403
         soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
         span = soup.find("span", {"class":"companyName"})
+        self._issuer_name = span.text[0:-43]
         cikurl = span.find("a")
         # print(cikurl.text[0:9])
         cik_num = cikurl.text[0:10]
@@ -80,25 +80,14 @@ class DataGrabber():
         '''
         url = "https://www.sec.gov/cgi-bin/own-disp?" + "action=getissuer&" + "CIK={}".format(self._cik_number)
         req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()}))
-        # with open("website.txt", mode='w', encoding='utf-8') as f:
-        #     d = str(req.read(), encoding='utf-8')
-        #     f.write(d)
-        # with open("website.txt", mode='r') as f:
-        #     req = f.read()
         soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
-        table_rows = soup.find_all("tr")
-        issuer_links = []
-        for row in table_rows:
-            r = row.find("a", href=True)
-            if(not r):
-                continue
-            if("getowner" in r['href']):
-                issuer_links.append(r)
+        rows = soup.find_all("a", {'href':re.compile(r'getowner')})
         issuer_cik = []
-        for link in issuer_links:
-            issuer_cik.append({"name":link.text,
-                               "url":"https://www.sec.gov/cgi-bin/own-disp?action=getowner&CIK=" + link['href'][-10:],
-                               "history":None
+        for row in rows:
+            i_cik = row['href'][-10:]
+            issuer_cik.append({"name":row.text,
+                               "url":"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={}&type=&dateb=&owner=only&count=40&search_text=".format(i_cik),
+                               "history":[]
                                })
         return issuer_cik
 
@@ -115,144 +104,99 @@ class DataGrabber():
             print("Got their history!")
             print(json.dumps(holder["history"], indent=2))
 
-
-    def _parse_options(self,url):
-        '''
-        gets an index url, will then get the xml document and parse to find
-        relevant values
-        :param url:
-        :return:
-        '''
-        loc = "https://www.sec.gov"
-        req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()}))
-        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
-        table_whole = soup.find("table", {"class":"tableFile"})
-        rows = table_whole.find_all("tr")
-        hrefs = []
-        #I want to locate the xml file
-        xml_link = ""
-        for r in rows:
-            file = r.find("a")
-            link = ''
-            if(file is not None):
-                link = file.text
-                if(".xml" in link):
-                    xml_link = file['href']
-                    break
-        # print(xml_link)
-        xml_link = "https://www.sec.gov" + xml_link
-        balance, price, date_exercisable, expiration_date, filing_date = self._parse_options_xml(xml_link)
-        return (balance, price, date_exercisable, expiration_date, filing_date)
-
-    def _parse_options_xml(self, url):
-        '''
-        function for parsing the xml file of a stock options grant
-        :param url:
-        :return:
-        '''
-        def value_check(item):
-            if(not item):
-                return "N/A"
-            else:
-                return item.text
-        # print("Url attempted: {}".format(url))
-        req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()})) #sometimes this will get a 403 forbidden error when requesting the same document too soon
-        #the error 403 might stop parsing from larger companies if tracking is done not per document.
-        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
-        dtable = soup.select("derivativeTable")
-        ndtable = soup.select("nonDerivativeTable")
-        fdate = soup.select("periodofreport")
-
-        price = "N/A"
-        exercise_date = "N/A"
-        expiration_date = "N/A"
-        filing_date = "N/A"
-        balance = "N/A"
-
-        balance_loc = "underlyingsecurityshares" #dtable
-        price_loc = "conversionorexerciseprice" #dtable
-        exercise_date_loc = "exercisedate" #dtable
-        expiration_date_loc = "expirationdate" #dtable
-        filing_date = fdate[0].text
-
-        balance = value_check(dtable[0].find(balance_loc).find("value"))
-        price = value_check(dtable[0].find(price_loc).find("value"))
-        exercise_date = value_check(dtable[0].find(exercise_date_loc).find("value"))
-        expiration_date = value_check(dtable[0].find(expiration_date_loc).find("value"))
-
-        #print(balance, price, exercise_date, expiration_date, filing_date)
-
-        return balance, price, exercise_date, expiration_date, filing_date
-
-
     def _get_history(self, url):
-        '''
-        gets the history of various types of holdings for a single filer
-        URL is the index page of the given holder with their CIK number
-        :param url:
-        :return:
-        '''
-        req = urlopen(urllib.request.Request(url, headers={"User-Agent":self.u_agent()}))
-        # print(str(req.read(), encoding='utf-8'))
+        req = urlopen(urllib.request.Request(url, headers={"User-Agent": self.u_agent()}))
         soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
-        table_whole = soup.find("table", {"id":"transaction-report"})
-        # print(type(table_whole))
-        # print(table_whole == None)
-        # print(table_whole)
-        # print(type(table_whole))
-        # table_whole = BeautifulSoup(table_whole.getText(), 'lxml')
-        items = table_whole.find_all("tr", {"class":False})
-        # print("Stuff here")
-        # for i in items:
-        #     print(i)
-        history = {}
-        # print("Done")
-        for i in items:
-            if (type(i) == type(None)):
-                continue
-            count = 0
-            loc = "https://www.sec.gov"
-            suffix = i.find("a", href=True)['href']
-            loc += suffix
-            for element in i:
-                if(count == 3):
-                    date = element.text
-                elif(count == 17):
-                    balance = element.text
-                elif(count == 23):
-                    transaction_type = element.text
-                count += 1
-            # print(transaction_type)
-            # print(balance)
-            # print(date)
-            # print("Got all the way here")
-            price = "N/A"
-            exercise_date = "N/A"
-            expiration_date = "N/A"
-            filing_date = "N/A"
-            if transaction_type not in history.keys():
-                history[transaction_type] = []
-            if ("Option" in transaction_type):
-                balance, price, exercise_date, expiration_date, filing_date = self._parse_options(loc)
-
-            history[transaction_type].append({"date":date,
-                                              "shares":balance,
-                                              "url":loc,
-                                              "price":price,
-                                              "exercise date":exercise_date,
-                                              "expiration date":expiration_date,
-                                              "filing date":filing_date
-                                              })
+        refs = soup.find_all("a", {'href': re.compile(r'/Archives/')})
+        na = "N/A"
+        history = []
+        # Going to separate more simply
+        rows = [row.parent.parent() for row in refs]
+        for row in rows:
+            f_index = "https://www.sec.gov" + row[2]['href']
+            f_type = row[0].text
+            if f_type in ['3', '4/A', '5']:
+                    continue
+            self._parse_filing_xml(f_index, history)
         return history
-            # history[transaction_type].append({"date":date, "balance":balance})
-        # print(json.dumps(history, indent=2))
 
-    # def _get_holdings(self):
-    #     '''
-    #     gets a relatively complete history of insider holdings, will add more functionality for stock options in the
-    #     future, just a proof of concept for now.
-    #     :return:
-    #     '''
+    def _parse_filing_xml(self, url, history):
+        def value(item):
+            if not item:
+                    return na
+            v = item.find("value")
+            if(v):
+                    return v.text
+            else:
+                    return na
+        def is_common_stock(txt):
+            reference = ['common', 'shares', 'stock', 'stocks', 'share']
+            check = txt.lower().split(sep=' ')
+            similarity = 0
+            for word in check:
+                    if word in reference:
+                            similarity += 1
+            if similarity:
+                    return True
+            else:
+                    return False
+
+        na = "N/A"
+        req = urlopen(urllib.request.Request(url, headers={"User-Agent": self.u_agent()}))
+        soup1 = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
+        ref = soup1.find("a", text=re.compile(r'.xml'))
+        xml_doc = "https://www.sec.gov" + ref['href']
+
+        req = urlopen(urllib.request.Request(xml_doc, headers={"User-Agent": self.u_agent()}))
+        soup = BeautifulSoup(str(req.read(), encoding='utf-8'), 'lxml')
+        if(soup.find("issuername") == None):
+            return
+        if (soup.find("issuername").text != self._issuer_name):
+            return
+        #maybe don't use the note for now
+        print("---------{}---------".format(xml_doc))
+        title = soup.find("securitytitle")
+        title = value(title)
+        tr_code = soup.find("transactioncode").text
+        fdate = soup.find("periodofreport").text
+        tdate = soup.find("transactiondate")
+        tdate = value(tdate)
+        ad = soup.find("transactionacquireddisposedcode")
+        ad = value(ad)
+
+        dtable = soup.find("derivativetable")
+        ndtable = soup.find("nonderivativetable")
+
+        tshares = na
+        tpps = na
+
+        if(ndtable):
+            tshares = ndtable.find("transactionshares")
+            tshares = value(tshares)
+            tpps = ndtable.find("transactionpricepershare")
+            tpps = value(tpps)
+
+        elif(dtable):
+            tshares = dtable.find("underlyingSecurityShares")
+            tshares = value(tshares)
+            tpps = dtable.find("conversionorexerciseprice")
+            tpps = value(tpps)
+
+        if(dtable and ndtable):
+            print("Check out what kind of transaction this is!")
+        f4 = {
+            "transaction_code": tr_code,
+            "filing_date": fdate,
+            "transaction_date": tdate,
+            "title:": title,
+            "shares": tshares,
+            "price": tpps,
+            "A/D": ad,
+            "document":xml_doc
+            }
+        history.append(f4)
+
+
 
 
 class Financials():
