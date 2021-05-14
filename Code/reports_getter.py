@@ -1,16 +1,13 @@
 #!/Users/Jon/anaconda3/envs/trading/bin/python3
 from bs4 import BeautifulSoup
-# from requests import Session
-import sys
-import os
 import urllib.request
-import datetime
 import json
 import random
-import html
 import re
 import copy
-
+import time
+import datetime
+import html
 
 '''
 The url given should be that of the page that contains the data files, just give it that, and then read off the hfrefs
@@ -29,7 +26,7 @@ class Financials():
 	statement_refs = {
 		'balancesheet': ['balance', 'sheet', 'sheets', 'financial', 'position'],
 		'cashflows': ['cash', 'flow', 'flows'],
-		'operations': ['income', 'statement', 'operations', 'loss'],
+		'operations': ['statement', 'operations', 'operations', 'operations', 'income'],
 		'equitychange': ['changes', 'change', 'in', 'stockholders', 'equity'],
 		'parenthetical': ['balance', 'sheet', '(parenthetical)', 'parenthetical', 'condensed']
 	}
@@ -95,6 +92,16 @@ class Financials():
 				new_str += letter
 		return new_str.lower()
 
+	def display(self):
+		for statement in self.documents.keys():
+			print(json.dumps(self.documents[statement]['table'], indent=2))
+		return
+
+	def _debug_contexts(self):
+		print("Balance Sheet    - {}".format(self.balance_sheet_context))
+		print("Cash Flows       - {}".format(self.cash_flow_context))
+		print("Income Statement - {}".format(self.income_statement_context))
+
 	def __init__(self, index_url, from_document=False):
 		'''
         Given a landing page with the xbrl, will collect filings and create tables
@@ -102,6 +109,9 @@ class Financials():
         '''
 		self._cik = "nothing to see here"
 		self._docs_available = False
+		self._defunct = False
+		self.documents = None
+		start = time.time()
 
 		self._balance_sheet_ref = None
 		self._cash_flow_ref = None
@@ -130,11 +140,6 @@ class Financials():
 		if not self._docs_available:
 			return
 		self._set_refs()
-		# print(self._balance_sheet_ref)
-		# print(self._cash_flow_ref)
-		# print(self._equity_change_ref)
-		# print(self._income_ref)
-		# print(self._parenthetical_ref)
 
 		self.balance_sheet = {}
 		self.cash_flows = {}
@@ -148,21 +153,25 @@ class Financials():
 		self._table_format(self.cash_flows, "cash_flows")
 		self._table_format(self.income_statement, "income_statement")
 
-		self.balance_sheet_context = self._get_context(self.balance_sheet['flatlist'])
-		self.cash_flow_context = self._get_context(self.cash_flows['flatlist'])
-		self.income_statement_context = self._get_context(self.income_statement['flatlist'])
+		self.balance_sheet_context = self._get_context(self.balance_sheet['flatlist'], 'balance_sheet')
+		self.cash_flow_context = self._get_context(self.cash_flows['flatlist'], 'cash_flows')
+		self.income_statement_context = self._get_context(self.income_statement['flatlist'], 'income_statement')
+
+		self._debug_contexts()
 
 		self.load(self.balance_sheet, 'balance_sheet', self.balance_sheet_context)
 		self.load(self.cash_flows, 'cash_flows', self.cash_flow_context)
 		self.load(self.income_statement, 'income_statement', self.income_statement_context)
-
-		docs = {
+		self.documents = {
 			'balance_sheet':self.balance_sheet,
 			'cash_flows':self.cash_flows,
 			'income_statement':self.income_statement
 		}
 		with open("qreport.json", 'w') as f:
-			json.dump(docs, f, indent=3)
+			json.dump(self.documents, f, indent=3)
+		end = time.time()
+		del(self._documents)
+		print("One report takes {} seconds!".format(end-start))
 
 		#need to parse the presentation arc for things like change in equity and the parenthetical statements
 		#The other things are probably less important so i don't need to worry about the structure
@@ -178,14 +187,31 @@ class Financials():
 		xd_table = soup.find("table",{"class":"tableFile", "summary":"Data Files"})
 		if not xd_table:
 			print("There are no XBRL documents!")
+			self.defunt = True
 			return False
 		# print(xd_table)
 		xrefs = xd_table.find_all("a")
 		xrefs = [x.parent.parent for x in xrefs]
-		schema_link = base + xrefs[0].find("a")["href"]
-		instance_link = base + xrefs[5].find("a")["href"]
-		calculation_link = base + xrefs[1].find("a")["href"]
-		presentation_link = base + xrefs[4].find("a")["href"]
+		ftype = soup.find("strong")
+		for ref in xrefs:
+			desc = ref()[1]
+			if desc:
+				desc = desc.text
+			else:
+				continue
+			if "SCHEMA" in desc or "SCH" in desc:
+				schema_ref = ref
+			elif "CALCULATION" in desc or "CAL" in desc:
+				calc_ref = ref
+			elif "INSTANCE" in desc:
+				instance_ref = ref
+			elif "PRESENTATION" in desc or "PRE" in desc:
+				presentation_ref = ref
+
+		schema_link = base + schema_ref.find("a")["href"]
+		instance_link = base + instance_ref.find("a")["href"]
+		calculation_link = base + calc_ref.find("a")["href"]
+		presentation_link = base + presentation_ref.find("a")["href"]
 		self._documents["instance"] = self._get_soup(instance_link)
 		self._documents["schema"] = self._get_soup(schema_link)
 		self._documents["calculation"] = self._get_soup(calculation_link)
@@ -218,6 +244,7 @@ class Financials():
 				self._equity_change_ref = best['item']
 			elif key == 'parenthetical':
 				self._parenthetical_ref = best['item']
+			# print("{} {}".format(key, best['item']))
 		return
 
 	def _camel_case(self, st):
@@ -230,10 +257,30 @@ class Financials():
 		elif st[0].isupper():
 			start_capital = True
 		stuff = re.split("(?=[A-Z])", st)
+		stuff = [x.lower() for x in stuff]
 		if(start_capital):
 			return stuff[1:]
 		else:
 			return stuff
+
+	def cleanse(self, s):
+		rev = s[::-1]
+		work = ""
+		found_capital = False
+		for letter in rev:
+			cap = letter.isupper()
+			if cap and not found_capital:
+				work += letter
+				found_capital = True
+			elif cap and found_capital:
+				continue
+			else:
+				found_capital = False
+				work += letter
+		work = work[::-1]
+		for i in range(0, len(work)):
+			if work[i].isupper():
+				return work[i:]
 
 	def parse_arc(self, reference):
 		'''
@@ -245,30 +292,38 @@ class Financials():
 			return tag["xlink:to"]
 		def xfrom(tag):
 			return tag["xlink:from"]
-		def gaap_split(linktofrom):
-			stuff = linktofrom.split(sep='_')
-			return stuff[1]
 		def brackets(s):
 			return '[\'' + s + '\']'
-		link = self._documents["calculation"].find("link:calculationlink", {"xlink:role":reference})
-		arcs = link.find_all("link:calculationarc") #gets all of the calc arcs
+		def gaap_split(s):
+			stuff = s.split('_')
+			if len(stuff[0]) == 1:
+				return stuff[1]
+			else:
+				return stuff[0]
+
+		links = self._documents["calculation"].find_all(re.compile("calculationlink"), {"xlink:role":reference})
+		arcs = []
+		for link in links:
+			larcs = link.find_all(re.compile("calculationarc"))
+			for arc in larcs:
+				arcs.append(arc)
+		# arcs = link.find_all(re.compile("calculationarc")) #gets all of the calc arcs
 		statement_items = []
 		for arc in arcs:
-			fro = gaap_split(xfrom(arc))
-			to = gaap_split(xto(arc))
+			fro = gaap_split(self.cleanse(xfrom(arc)))
+			to = gaap_split(self.cleanse(xto(arc)))
 			statement_items.append(fro)
 			statement_items.append(to)
 		statement_items = list(set(statement_items))
-		# print(reference)
-		# print(json.dumps(statement_items, indent=2))
+
 		new = {}
 		for item in statement_items:
 			new[item] = {'to': [], 'from': []}
 
 		for item in statement_items:
 			for arc in arcs:
-				fro = gaap_split(xfrom(arc))
-				t = gaap_split(xto(arc))
+				fro = gaap_split(self.cleanse(xfrom(arc)))
+				t = gaap_split(self.cleanse(xto(arc)))
 				if item == fro:
 					new[item]['to'].append(t)
 				elif item == t:
@@ -284,7 +339,7 @@ class Financials():
 
             'us-gaap:Liabilities'[to] should be ['us-gaap:LiabilitiesAndStockholdersEquity']
             '''
-
+			print(json.dumps(statement_items, indent=2))
 			self._missing_liabilities = True
 			subs = copy.deepcopy(new["LiabilitiesAndStockholdersEquity"]['to'])
 			new['Liabilities'] = {}
@@ -345,7 +400,8 @@ class Financials():
 						flat_list.append(l_item)
 						used.append(child)
 				for item in used:
-					items_copy.remove(item)
+					if item in items_copy:
+						items_copy.remove(item)
 				level += 1
 		return flat_list
 
@@ -358,21 +414,147 @@ class Financials():
 			exec('{}{} = new_item()'.format(base, item['key']))
 		return
 
-	def _get_context(self, statement_flatlist):
-		def comp_date(ctex):
-			date = ctex.find("enddate")
-			if not date:
-				date = ctex.find("instant")
-			return date.text
+	# def _get_context(self, statement_flatlist):
+	# 	def comp_date(ctex):
+	# 		date = ctex.find(re.compile("enddate"))
+	# 		if not date:
+	# 			date = ctex.find(re.compile("instant"))
+	# 			if not date:
+	# 				return "1900-01-01"
+	# 		return date.text
+	# 	def segment(items):
+	# 		if type(items) == type(None):
+	# 			return True
+	# 		else:
+	# 			for item in items:
+	# 				i_ref = item['contextref']
+	# 				i_schema = self._documents['instance'].find(re.compile("context"), {"id":i_ref})
+	# 				if i_schema.find(re.compile("segment")):
+	# 					return True
+	# 			return False
+	# 	example_item = statement_flatlist[0]
+	# 	s_item = example_item['search'].lower()[0:90]
+	# 	items = self._documents['instance'].find_all(re.compile(s_item))
+	# 	count = 1
+	# 	while(segment(items)):
+	# 		if count > len(statement_flatlist) - 1:
+	# 			break
+	# 		s_item = statement_flatlist[count]
+	# 		s_item = s_item['search'].lower()[0:90]
+	# 		items = self._documents['instance'].find_all(re.compile(s_item))
+	# 		count += 1
+	# 	ctexts = [x['contextref'] for x in items]
+	# 	ctexts = list(set(ctexts))
+	# 	ctexts = [self._documents['instance'].find(re.compile("context"), {"id":x}) for x in ctexts]
+	# 	dates = [comp_date(x) for x in ctexts]
+	# 	max_index = dates.index(max(dates))
+	# 	return ctexts[max_index]['id']
 
-		example_item = statement_flatlist[0]
-		s_item = example_item['search'].lower()[0:90]
-		items = self._documents['instance'].find_all(re.compile(s_item))
-		ctexts = [x['contextref'] for x in items]
-		ctexts = [self._documents['instance'].find("context", {"id":x}) for x in ctexts]
-		dates = [comp_date(x) for x in ctexts]
-		max_index = dates.index(max(dates))
-		return ctexts[max_index]['id']
+	def _get_context(self, statement_flatlist, statement_type):
+		d_pattern = None
+		has_instant = ['balance_sheet',
+					   'parenthetical']
+		has_range = ['cash_flows',
+					 'income_statement']
+		if statement_type in has_instant:
+			d_pattern = re.compile("instant")
+		elif statement_type in has_range:
+			d_pattern = re.compile("startdate")
+		else:
+			return None
+		def _remove_bad(ctexts):
+			stuff = ctexts
+			remove_these = []
+			for ctex in ctexts:
+				context = self._documents['instance'].find(re.compile("context"), {"id":ctex})
+				if context.find(re.compile("segment")):
+					remove_these.append(ctex)
+				elif context.find(re.compile("enddate")) and statement_type in has_instant:
+					remove_these.append(ctex)
+				elif context.find(re.compile("instant")) and statement_type in has_range:
+					remove_these.append(ctex)
+				else:
+					continue
+			for bad_item in remove_these:
+				stuff.remove(bad_item)
+			return stuff
+		def _dfroms(dstring):
+			y, m, d = [int(x) for x in dstring.split(sep='-')]
+			return datetime.date(y, m, d)
+
+		for i in range(0, len(statement_flatlist)):
+			inspect = statement_flatlist[i]['search'].lower()[0:90] #needs to be cutoff for regex
+			items = self._documents['instance'].find_all(re.compile(inspect))
+			ctexts = [x['contextref'] for x in items]
+			ctexts = list(set(ctexts)) #eliminate duplicates
+			ctexts = _remove_bad(ctexts)
+			if len(ctexts) == 0:
+				continue
+			else:
+				break
+		ctexts = [self._documents['instance'].find(re.compile("context"), {"id":x}) for x in ctexts]
+		dates = [_dfroms(x.find(d_pattern).text) for x in ctexts]
+		m_ind = dates.index(max(dates))
+		return ctexts[m_ind]['id']
+
+
+
+
+
+	# def _get_context(self, statement_flatlist):
+	# 	def comp_date(ctex):
+	# 		print(ctex)
+	# 		print(statement_flatlist[0])
+	# 		date = ctex.find(re.compile("enddate"))
+	# 		if not date:
+	# 			date = ctex.find(re.compile("instant"))
+	# 			if not date:
+	# 				return "1900-01-01"
+	# 		return date.text
+	# 	def context_has_segment(ctex):
+	# 		if not ctex:
+	# 			return True
+	# 		elif ctex.find(re.compile("segment")):
+	# 			return True
+	# 		else:
+	# 			return False
+	# 	def context_of_item(item):
+	# 		if item == None:
+	# 			return None
+	# 		ctex = item['contextref']
+	# 		return self._documents['instance'].find(re.compile("context"), {"id":ctex})
+	# 	def lfalse(ls):
+	# 		found = False
+	# 		for i in ls:
+	# 			if not i:
+	# 				found = True
+	# 		return found
+	# 	def seg(ctexts):
+	# 		if not ctexts:
+	# 			return True
+	# 		else:
+	# 			for ctex in ctexts:
+	# 				if context_has_segment(ctex):
+	# 					return True
+	# 			return False
+	# 	sample_item = statement_flatlist[0]
+	# 	s_item = sample_item['search'].lower()[0:90]
+	# 	items = self._documents['instance'].find_all(re.compile(s_item))
+	# 	ctexts = [context_of_item(x) for x in items]
+	# 	count = 1
+	# 	while(lfalse(ctexts) and seg(ctexts)):
+	# 		sample_item = statement_flatlist[count]
+	# 		s_item = sample_item['search'].lower()[0:90]
+	# 		items = self._documents['instance'].find_all(re.compile(s_item))
+	# 		ctexts = [context_of_item(x) for x in items]
+	# 		count += 1
+	# 	ctexts = [x['contextref'] for x in items]
+	# 	ctexts = list(set(ctexts))
+	# 	ctexts = [self._documents['instance'].find(re.compile("context"), {"id": x}) for x in ctexts]
+	# 	dates = [comp_date(x) for x in ctexts]
+	# 	max_index = dates.index(max(dates))
+	# 	return ctexts[max_index]['id']
+
 
 	def load(self, statement, s_base, ctex):
 		base = 'self.' + s_base + '''['table']'''
@@ -380,17 +562,133 @@ class Financials():
 			s_item = item['search'].lower()[0:90]
 			# print(s_item)
 			# print(ctex)
-			val = self._documents['instance'].find(re.compile(s_item), {"contextref":ctex}).text
-			if not len(val):
+			val = self._documents['instance'].find_all(re.compile(":" + s_item), {"contextref":ctex})
+			if not val:
+				# print(json.dumps([item, s_item, ctex], indent=2))
+				pass
+			else:
+				names = [len(v.name) for v in val]
+				good_ind = names.index(min(names))
+				val = val[good_ind]
+				val = val.text
+			if not val:
 				continue
 			exec_string = base + item['key'] + '''['value']''' + " = " + "{}".format(val)
 			exec(exec_string)
 
+	# def search(self, statement, words, level=None):
+	# 	'''
+	# 	possible statements are:
+	# 		'balance_sheet'
+	# 		'cash_flows'
+	# 		'income_statement'
+	# 	:param statement:
+	# 	:param words:
+	# 	:return:
+	# 	'''
+	# 	def l_matches(w_list1, w_list2):
+	# 		matches = 0
+	# 		for word in w_list1:
+	# 			if word in w_list2:
+	# 				matches += 1
+	# 		return matches
+    #
+	# 	if statement not in self.documents.keys():
+	# 		return None
+	# 	else:
+	# 		base = "self.documents[\'{}\']".format(statement) + '''['table']'''
+	# 		possible_results = self.documents[statement]['flatlist']
+	# 		best = {"key":None, "matches":0}
+	# 		for entry in possible_results:
+	# 			if level == None or level == entry['level']:
+	# 				num_matches = l_matches(words, entry['words'])
+	# 				if num_matches > best['matches']:
+	# 					best['key'] = entry['key']
+	# 					best['matches'] = num_matches
+	# 			elif entry['level'] != level:
+	# 				continue
+	# 			else:
+	# 				pass
+	# 	val = best['key']
+	# 	eval_string = base + val
+	# 	return eval(eval_string)
 
+	def search(self, statement, terms, level=None, exclude=None):
+		'''
+		:param statement: STRING ['balance_sheet', 'cash_flows', 'income_statement']
+		:param terms: LIST words to try matching
+		:param level: INT level, enforce more specific or less specific entry (useful for finding entries on tables with structure)
+		:param exclude: LIST if words are given in exclude, then a match against one of these will force an entry not to match
+		:return:
+		'''
+		def l_matches(w_list1, w_list2):
+			matches = 0
+			for word in w_list1:
+				if word in w_list2:
+					matches += 1
+			return matches
+		if statement not in self.documents.keys():
+			return None
+		else:
+			base = "self.documents[\'{}\']".format(statement) + '''['table']'''
+			search_pool = self.documents[statement]['flatlist']
+			hits = {}
+			for entry in search_pool:
+				matches = l_matches(terms, entry['words'])
+				restricted = None
+				if exclude:
+					restricted = l_matches(terms, exclude)
+				if matches and not restricted:
+					k = int(entry['level'])
+					if k not in hits.keys():
+						hits[k] = []
+					hits[k].append((entry, matches))
+			#now write some logic for what to return
+			best = {"matches": 0, 'key': None}
+			if not level:
+				for k in hits.keys():
+					for entry in hits[k]:
+						if entry[1] > best['matches']:
+							best['key'] = entry[0]['key']
+							best['matches'] = entry[1]
+			else:
+				use = level
+				if level not in hits.keys():
+					lv_list = list(hits.keys())
+					lv_list.sort()
+					if level <= 0:
+						use = lv_list[0]
+					elif level > len(lv_list) - 1:
+						use = lv_list[-1]
+					else:
+						use = level
+				for entry in hits[use]:
+					if entry[1] > best['matches']:
+						best['key'] = entry[0]['key']
+						best['matches'] = entry[1]
+		val = best['key']
+		eval_string = base + val
+		return(eval(eval_string))
+
+
+def p(l):
+	print(json.dumps(l, indent=3))
 
 if __name__ == "__main__":
-	index = "https://www.sec.gov/Archives/edgar/data/1621832/000143774921004116/0001437749-21-004116-index.htm"
-	f = Financials(index)
+	# index = "https://www.sec.gov/Archives/edgar/data/1621832/000143774921004116/0001437749-21-004116-index.htm"
+	# index = "https://www.sec.gov/Archives/edgar/data/1318605/000095017021000046/0000950170-21-000046-index.htm"
+	# index = "https://www.sec.gov/Archives/edgar/data/1616543/000155837020013382/0001558370-20-013382-index.htm"
+	tesla_report = "https://www.sec.gov/Archives/edgar/data/1318605/000095017021000046/0000950170-21-000046-index.htm"
+	tesla_report = "https://www.sec.gov/Archives/edgar/data/1318605/000156459020047486/0001564590-20-047486-index.htm"
+	mbii_report = "https://www.sec.gov/Archives/edgar/data/1441693/000149315220020840/0001493152-20-020840-index.htm"
+	index = "https://www.sec.gov/Archives/edgar/data/1441693/000149315220020840/0001493152-20-020840-index.htm"
+	pltr = "https://www.sec.gov/Archives/edgar/data/1321655/000119312521159222/0001193125-21-159222-index.htm"
+	test = "https://www.sec.gov/Archives/edgar/data/1441693/000149315218011825/0001493152-18-011825-index.htm"
+
+	test = Financials(test)
+	test.display()
+	# tsla = Financials(tesla_report)
+	# tsla = Financials(tesla_report)
 
 # if __name__ == '__main__':
 # 	ses = Session()
